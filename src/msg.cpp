@@ -59,6 +59,46 @@ static void convert_8bit(pst_string &str, const char *charset) {
     DEBUG_RET();
 }
 
+static void write_email(GsfOutput *output, pst_item *item, pst_file *pst, uint32_t embedded);
+
+static void embedded_property(GsfOutfile *out, property_list &prop, uint32_t tag, pst_file *pf, pst_item_attach *attach);
+static void embedded_property(GsfOutfile *out, property_list &prop, uint32_t tag, pst_file *pf, pst_item_attach *attach)
+{
+    pst_index_ll *ptr;
+    ptr = pst_getID(pf, attach->i_id);
+
+    pst_desc_tree d_ptr;
+    d_ptr.d_id = 0;
+    d_ptr.parent_d_id = 0;
+    d_ptr.assoc_tree = NULL;
+    d_ptr.desc = ptr;
+    d_ptr.no_child = 0;
+    d_ptr.prev = NULL;
+    d_ptr.next = NULL;
+    d_ptr.parent = NULL;
+    d_ptr.child = NULL;
+    d_ptr.child_tail = NULL;
+
+    pst_item *item = pst_parse_item(pf, &d_ptr, attach->id2_head);
+    if (!item || !item->email) return;
+
+    vector<char> n(50);
+    snprintf(&n[0], n.size(), "__substg1.0_%08X", tag);
+    GsfOutput *dst = gsf_outfile_new_child(out, &n[0], true);
+
+    write_email(dst, item, pf, true);
+
+    gsf_output_close(dst);
+    g_object_unref(G_OBJECT(dst));
+
+    property p;
+    p.tag = tag;
+    p.flags = 0x6; // make all the properties writable
+    p.length = 0;
+    p.reserved = 0;
+    prop.push_back(p);
+}
+
 
 static void empty_property(GsfOutfile *out, uint32_t tag);
 static void empty_property(GsfOutfile *out, uint32_t tag) {
@@ -202,13 +242,6 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
     if (!item->email) return;
     DEBUG_ENT("write_msg_email");
 
-    pst_item_email &email = *(item->email);
-
-    char charset[30];
-    const char* body_charset = pst_default_charset(item, sizeof(charset), charset);
-    DEBUG_INFO(("%s body charset seems to be %s\n", fname, body_charset));
-    body_charset = "iso-8859-1//TRANSLIT//IGNORE";
-
     gsf_init();
 
     GsfOutfile *outfile;
@@ -222,6 +255,32 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
         DEBUG_RET();
         return;
     }
+
+    outfile = gsf_outfile_msole_new(output);
+    g_object_unref(G_OBJECT(output));
+
+    output = GSF_OUTPUT(outfile);
+
+    write_email(output, item, pst, false);
+
+    gsf_output_close(output);
+    g_object_unref(G_OBJECT(output));
+
+    gsf_shutdown();
+    DEBUG_RET();
+}
+
+
+static void write_email(GsfOutput *output, pst_item *item, pst_file *pst, uint32_t embedded)
+{
+    if (!item->email) return;
+
+    pst_item_email &email = *(item->email);
+
+    char charset[30];
+    const char *body_charset = pst_default_charset(item, sizeof(charset), charset);
+    DEBUG_INFO(("%s body charset seems to be %s\n", output->name, body_charset));
+    body_charset = "iso-8859-1//TRANSLIT//IGNORE";
 
     struct top_property_header {
         uint32_t  reserved1;
@@ -237,10 +296,6 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
     top_property_header top_head;
     memset(&top_head, 0, sizeof(top_head));
 
-    outfile = gsf_outfile_msole_new(output);
-    g_object_unref(G_OBJECT(output));
-
-    output = GSF_OUTPUT(outfile);
     property_list prop_list;
 
     int_property(prop_list, 0x00170003, 0x6, email.importance);
@@ -381,7 +436,12 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
                     int_property(prop_list, 0x37100003, 0x6, a->sequence);  // PR_ATTACH_MIME_SEQUENCE
                     GsfOutfile *out = GSF_OUTFILE (output);
                     string_property(out, prop_list, 0x0FF90102, item->record_key);
-                    string_property(out, prop_list, 0x37010102, fp);
+                    if (a->method == PST_ATTACH_EMBEDDED) {
+                        embedded_property(out, prop_list, 0x3701000D, pst, a);
+                    }
+                    else {
+                        string_property(out, prop_list, 0x37010102, fp);
+                    }
                     if (a->filename2.str) {
                         // have long file name
                         string_property(out, prop_list, 0x3707001E, body_charset, a->filename2);
@@ -408,9 +468,10 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
         a = a->next;
     }
 
-    write_properties(out, prop_list, (const guint8*)&top_head, sizeof(top_head));
+    write_properties(out, prop_list, (const guint8*)&top_head, sizeof(top_head) - (embedded ? 8 : 0));
 
-    {
+    // embedded messages inherit __nameid from parent
+    if (!embedded) {
         GsfOutput  *output = gsf_outfile_new_child(out, "__nameid_version1.0", true);
         {
             GsfOutfile *out = GSF_OUTFILE (output);
@@ -421,11 +482,4 @@ void write_msg_email(char *fname, pst_item* item, pst_file* pst) {
             g_object_unref(G_OBJECT(output));
         }
     }
-
-    gsf_output_close(output);
-    g_object_unref(G_OBJECT(output));
-
-    gsf_shutdown();
-    DEBUG_RET();
 }
-
